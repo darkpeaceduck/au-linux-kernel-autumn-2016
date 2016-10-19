@@ -9,6 +9,7 @@
 #endif //__KERNEL__
 
 #define VSD_IOCTL_MAGIC 'V'
+#define MISC_DEVICE_NAME "vsd"
 
 typedef struct vsd_ioctl_get_size_arg {
     size_t size;

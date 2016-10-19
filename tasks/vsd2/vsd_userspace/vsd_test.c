@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <string.h>
 #include <unistd.h>
+ #include <sys/wait.h>
 
 #include "vsd_device.h"
 
@@ -43,6 +44,23 @@ static void run_one_test(off_t vsd_offset, size_t vsd_size) {
     free(vsd_rw_buf);
 }
 
+static void tst_fork(off_t vsd_off, size_t vsd_size) {
+	pid_t pid = fork();
+	int rc;
+	char* addr = vsd_mmap(vsd_off);
+	if (!pid) {
+		TEST(vsd_set_size(vsd_size / 2));
+		TEST(!vsd_munmap(addr, vsd_off));
+		exit(0);
+	} else {
+		waitpid(pid, &rc, 0);
+		TEST(!rc);
+		TEST(!vsd_munmap(addr, vsd_off));
+		TEST(!vsd_set_size(vsd_size / 2));
+		TEST(!vsd_set_size(vsd_size));
+	}
+}
+
 int main()
 {
     TEST(!vsd_init());
@@ -53,6 +71,7 @@ int main()
 
     run_one_test(0, vsd_size);
     run_one_test(PAGE_SIZE, vsd_size - PAGE_SIZE);
+    tst_fork(PAGE_SIZE, vsd_size - PAGE_SIZE);
 
     TEST(!vsd_deinit());
     printf("Ok\n");
