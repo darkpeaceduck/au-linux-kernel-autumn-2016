@@ -6,7 +6,15 @@
 
 typedef struct mutex {
     // TODO store userspace side mutex state here
-} mutex_t;
+	shared_spinlock_t lock;
+	int queue_empty;
+	int completed;
+	mutex_id_t id;
+} __attribute__ ((aligned (8))) mutex_t;
+/* align to 8 to support get/set
+ * atomically for queue_empty and completed flags
+ */
+
 
 // Return codes
 typedef enum {

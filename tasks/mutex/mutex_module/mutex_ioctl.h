@@ -15,15 +15,34 @@
 // TODO define mutex dev IOCTL interface here
 // Example:
 
-/*
-typedef unsigned long mutex_id_t;
+typedef int mutex_id_t;
 
-typedef struct mutex_ioctl_lock_create_arg {
-    mutex_id_t id; // out param
-} mutex_ioctl_lock_create_arg_t;
+typedef struct mutex_ioctl_create_arg {
+	int * queue_empty;
+	int * completed;
+	mutex_id_t * mutex_id;
+} mutex_ioctl_create_arg_t;
 
-#define MUTEX_IOCTL_LOCK_CREATE \
-    _IOW(MUTEX_IOCTL_MAGIC, 1, mutex_ioctl_lock_create_arg_t)
-*/
+typedef struct mutex_ioctl_destroy_arg {
+	mutex_id_t id;
+} mutex_ioctl_destroy_arg_t;
+
+typedef struct mutex_ioctl_lock_arg {
+	mutex_id_t id;
+} mutex_ioctl_lock_arg_t;
+
+typedef struct mutex_ioctl_unlock_arg {
+	mutex_id_t id;
+} mutex_ioctl_unlock_arg_t;
+
+#define MUTEX_IOCTL_CREATE \
+    _IOW(MUTEX_IOCTL_MAGIC, 1, mutex_ioctl_create_arg_t)
+#define MUTEX_IOCTL_DESTROY \
+    _IOW(MUTEX_IOCTL_MAGIC, 2, mutex_ioctl_destroy_arg_t)
+#define MUTEX_IOCTL_LOCK \
+	_IOW(MUTEX_IOCTL_MAGIC, 3, mutex_ioctl_lock_arg_t)
+#define MUTEX_IOCTL_UNLOCK \
+	_IOW(MUTEX_IOCTL_MAGIC, 4, mutex_ioctl_unlock_arg_t)
+
 
 #endif //_VSD_UAPI_H
