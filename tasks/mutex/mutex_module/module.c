@@ -16,6 +16,7 @@
 #include <linux/spinlock_types.h>
 #include <linux/err.h>
 #include <linux/wait.h>
+#include <linux/rcupdate.h>
 #include "mutex_ioctl.h"
 
 #define LOG_TAG "[MUTEX_MODULE] "
@@ -29,6 +30,8 @@ typedef struct kernel_mutex_keeper {
 	spinlock_t user;
 	mutex_id_t id;
 	int destroying;
+	spinlock_t ref_lock;
+	int ref_cnt;
 }kernel_mutex_keeper_t;
 
 typedef struct tgstate {
@@ -59,6 +62,21 @@ typedef enum {
 	DEFAULT
 } search_mode;
 
+static void mutex_keeper_release(kernel_mutex_keeper_t * mutex) {
+	kfree(mutex);
+}
+
+static void mutex_ref_dec(kernel_mutex_keeper_t * mutex, int dec) {
+	int delete = 0;
+	spin_lock(&mutex->ref_lock);
+	mutex->ref_cnt += dec;
+	if (mutex->ref_cnt == 0)
+		delete = 1;
+	spin_unlock(&mutex->ref_lock);
+	if (delete)
+		mutex_keeper_release(mutex);
+}
+
 static kernel_mutex_keeper_t * mutex_create(mutex_id_t id,
 		int __user * queue_empty,
 		int __user * completed) {
@@ -66,24 +84,33 @@ static kernel_mutex_keeper_t * mutex_create(mutex_id_t id,
 
 	/* no rcu head initialoation */
 	INIT_HLIST_NODE(&keeper->list);
+	/* INIT_RCU_HEAD(&keeper->rcu); */
 	init_waitqueue_head(&keeper->q);
 	keeper->queue_empty = queue_empty;
 	keeper->completed = completed;
 	spin_lock_init(&keeper->user);
+	spin_lock_init(&keeper->ref_lock);
 	keeper->id = id;
 	keeper->destroying = 0;
+	keeper->ref_cnt = 1; /* list ref */
 	return keeper;
+}
+
+void rcu_mutex_release_cb(struct rcu_head *rcu) {
+	kernel_mutex_keeper_t *keeper = container_of(rcu, kernel_mutex_keeper_t, rcu);
+	mutex_ref_dec(keeper, -1);
 }
 
 static void mutex_shedule_release(kernel_mutex_keeper_t *keeper) {
 	hlist_del_rcu(&keeper->list);
-	kfree_rcu(keeper, rcu);
+	call_rcu(&keeper->rcu, rcu_mutex_release_cb);
 }
 
 static tgstate_t * tg_create(void) {
 	tgstate_t * fresh = kmalloc(sizeof(tgstate_t), GFP_KERNEL);
 	INIT_HLIST_HEAD(&fresh->mutexes);
 	INIT_HLIST_NODE(&fresh->list);
+	/* INIT_RCU_HEAD(&fresh->rcu); */
 	spin_lock_init(&fresh->wlock);
 	fresh->tgid = current->tgid;
 	fresh->last_id = 0;
@@ -172,6 +199,7 @@ static int mutex_dev_open(struct inode *inode, struct file *filp)
     return 0;
 }
 
+/* assume, that dev_release can't be called from critical section */
 static int mutex_dev_release(struct inode *inode, struct file *filp)
 {
 	tgstate_t * tg_state;
@@ -204,7 +232,7 @@ static int mutex_dev_release(struct inode *inode, struct file *filp)
 static long mutex_ioctl_destroy(mutex_ioctl_destroy_arg_t __user *uarg)  {
 	mutex_ioctl_destroy_arg_t arg;
 	tgstate_t * tg_state;
-	kernel_mutex_keeper_t * keeper;
+	kernel_mutex_keeper_t * keeper = NULL;
 	long rc = 0;
 
 
@@ -227,12 +255,17 @@ static long mutex_ioctl_destroy(mutex_ioctl_destroy_arg_t __user *uarg)  {
 	}
 
 	keeper->destroying = 1;
-	wake_up_all(&keeper->q);
+	mutex_ref_dec(keeper, 1);
 	mutex_shedule_release(keeper);
 out_spin:
 	spin_unlock(&tg_state->wlock);
 out:
  	rcu_read_unlock();
+
+ 	if (keeper) {
+ 		wake_up_all(&keeper->q);
+ 		mutex_ref_dec(keeper, -1);
+ 	}
  	return rc;
 }
 
@@ -298,7 +331,7 @@ static void mutex_wake_single(kernel_mutex_keeper_t * keeper) {
 static long mutex_ioctl_lock(mutex_ioctl_lock_arg_t __user *uarg) {
 	mutex_ioctl_lock_arg_t arg;
 	tgstate_t * state;
-	kernel_mutex_keeper_t * keeper;
+	kernel_mutex_keeper_t * keeper = NULL;
 	int rc = 0;
 
 
@@ -316,20 +349,24 @@ static long mutex_ioctl_lock(mutex_ioctl_lock_arg_t __user *uarg) {
 		rc = -EFAULT;
 		goto lock_out;
 	}
-	mutex_wait_compeleted(keeper);
-	/* flag sets before wake_up_all, flag checks after wake -
-	 * not need additional locking here
-	 */
-	rc = keeper->destroying ? -EFAULT : 0;
+	mutex_ref_dec(keeper, 1);
 lock_out:
 	rcu_read_unlock();
+	if (keeper) {
+		mutex_wait_compeleted(keeper);
+		/* flag sets before wake_up_all, flag checks after wake -
+		 * not need additional locking here
+		 */
+		rc = keeper->destroying ? -EFAULT : 0;
+		mutex_ref_dec(keeper, -1);
+	}
 	return rc;
 }
 
 static long mutex_ioctl_unlock(mutex_ioctl_unlock_arg_t __user *uarg) {
 	mutex_ioctl_unlock_arg_t arg;
 	tgstate_t * state;
-	kernel_mutex_keeper_t * keeper;
+	kernel_mutex_keeper_t * keeper = NULL;
 	int rc = 0;
 
 	if (copy_from_user(&arg, uarg, sizeof(arg)))
@@ -346,9 +383,13 @@ static long mutex_ioctl_unlock(mutex_ioctl_unlock_arg_t __user *uarg) {
 		rc = -EFAULT;
 		goto unlock_out;
 	}
-	mutex_wake_single(keeper);
+	mutex_ref_dec(keeper, 1);
 unlock_out:
 	rcu_read_unlock();
+	if (keeper) {
+		mutex_wake_single(keeper);
+		mutex_ref_dec(keeper, -1);
+	}
 	return rc;
 }
 
